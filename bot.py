@@ -4,7 +4,11 @@ import os
 from dotenv import load_dotenv
 from config.settings import BOT_PREFIX, INTENTS
 
+from keep_alive import keep_alive
+
 load_dotenv()
+
+keep_alive()
 
 class CPBot(commands.Bot):
     def __init__(self):
