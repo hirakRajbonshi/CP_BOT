@@ -3,16 +3,18 @@ from utils.codeforces_api import CodeforcesAPI
 import random
 
 
-class Duel:
-    """Pure data model representing a duel between two users.
+class Round:
+    """Pure data model for a multi-player round (2-5 players).
 
-    Contains state, accessors, and problem generation.
-    No Discord or database dependencies (except CodeforcesAPI for problem generation).
+    Logic is identical to Duel, but supports a list of player IDs.
+    The first player to get AC on the current problem advances it for everyone.
     """
 
-    def __init__(self, challenger_id, opponent_id, n, low, high, time_per_problem):
+    MAX_PLAYERS = 5
+
+    def __init__(self, challenger_id, opponent_ids, n, low, high, time_per_problem):
         self.challenger_id = challenger_id
-        self.opponent_id = opponent_id
+        self.player_ids = [challenger_id] + list(opponent_ids)  # all players
 
         self.n = n
         self.low = low
@@ -21,21 +23,20 @@ class Duel:
 
         self.problems = []
         self.current_problem_idx = 0
-        self.problem_solved = False
+        self.problem_solved = False  # True once someone has solved the current problem
 
-        self.scores = {
-            challenger_id: 0,
-            opponent_id: 0
-        }
-
-        self.solved = {
-            challenger_id: set(),
-            opponent_id: set()
-        }
+        self.scores = {pid: 0 for pid in self.player_ids}
+        self.solved = {pid: set() for pid in self.player_ids}
 
         self.start_time = None
         self.problem_start_time = None
         self.active = False
+
+    # -------------------- Properties --------------------
+
+    @property
+    def player_count(self):
+        return len(self.player_ids)
 
     # -------------------- Problem Generation --------------------
 
@@ -75,12 +76,10 @@ class Duel:
         random.shuffle(contest_ids)
 
         # Evenly spaced target ratings
-        targets = []
-        for i in range(self.n):
-            if self.n > 1:
-                targets.append(self.low + (self.high - self.low) * i / (self.n - 1))
-            else:
-                targets.append((self.low + self.high) // 2)
+        if self.n > 1:
+            targets = [self.low + (self.high - self.low) * i / (self.n - 1) for i in range(self.n)]
+        else:
+            targets = [(self.low + self.high) // 2]
 
         selected = []
         used_contests = set()
@@ -150,9 +149,8 @@ class Duel:
         elapsed = (datetime.now() - self.problem_start_time).total_seconds() / 60
         return elapsed >= self.time_per_problem
 
-    def get_opponent_id(self, user_id):
-        return (
-            self.opponent_id
-            if user_id == self.challenger_id
-            else self.challenger_id
-        )
+    def remove_player(self, user_id):
+        """Remove a player (forfeit). Returns True if round should continue, False if too few remain."""
+        if user_id in self.player_ids:
+            self.player_ids.remove(user_id)
+        return len(self.player_ids) > 1

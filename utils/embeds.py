@@ -38,14 +38,13 @@ class EmbedBuilder:
     @staticmethod
     def duel_problem(problem, current, total, time_limit):
         """Create an embed for a duel problem"""
-        cf_api = CodeforcesAPI()
         embed = discord.Embed(
             title=f"📝 Problem {current} of {total}",
             color=COLOR_PRIMARY
         )
         embed.add_field(
             name="Problem",
-            value=f"[{problem['contestId']}{problem['index']} - {problem['name']}]({cf_api.get_problem_url(problem)})",
+            value=f"[{problem['contestId']}{problem['index']} - {problem['name']}]({CodeforcesAPI.get_problem_url(problem)})",
             inline=False
         )
         embed.add_field(name="Rating", value=problem.get('rating', 'N/A'), inline=True)

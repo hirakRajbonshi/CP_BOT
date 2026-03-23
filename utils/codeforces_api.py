@@ -10,8 +10,9 @@ from utils.problem_cache import (
     load_cached_problems,
     save_problems
 )
+
 class CodeforcesAPI:
-    """Handles all interactions with the Codeforces API"""
+    """Handles all interactions with the Codeforces API using static methods"""
     
     @staticmethod
     async def fetch(session, url):
@@ -21,6 +22,14 @@ class CodeforcesAPI:
                 return await response.json()
             return None
     
+    @staticmethod
+    async def get_user_rating(handle):
+        async with aiohttp.ClientSession() as session:
+            data = await CodeforcesAPI.fetch(session, f"{CODEFORCES_API_BASE}user.info?handles={handle}")
+            if data and data.get('status') == 'OK':
+                return data['result'][0]['rating']
+        return None
+
     @staticmethod
     async def get_contests():
         """Fetch contest list (cached, refreshed once per day)"""
@@ -66,9 +75,10 @@ class CodeforcesAPI:
                 return data['result']
         return []
     
-    async def check_compilation_error(self, handle, contest_id, problem_index):
+    @staticmethod
+    async def check_compilation_error(handle, contest_id, problem_index):
         """Check if user has a compilation error on specific problem"""
-        submissions = await self.get_user_submissions(handle, 50)
+        submissions = await CodeforcesAPI.get_user_submissions(handle, 50)
         for sub in submissions:
             problem = sub.get('problem', {})
             if (problem.get('contestId') == contest_id and 

@@ -1,63 +1,71 @@
 import discord
 from discord.ext import commands
-from models.duel import Duel, DuelManager
-from utils.data_manager import DataManager
+from services.duel_service import DuelService
 from utils.embeds import EmbedBuilder
-from config.settings import MIN_PROBLEMS, MAX_PROBLEMS
+
 
 class Duels(commands.Cog):
-    """Handles duel challenges between users"""
-    
+    """Discord UI for duel challenges"""
+
     def __init__(self, bot):
         self.bot = bot
-        self.duel_manager = DuelManager()
-        self.data_manager = DataManager()
-    
+        self.duel_service = DuelService()
+
     @commands.command(name='challenge')
-    async def challenge(self, ctx, opponent: discord.Member, n: int, low: int, high: int, t: int):
-        """Challenge another user to a duel"""
-        # Validation
-        if opponent.bot:
-            await ctx.send(embed=EmbedBuilder.error("Cannot challenge a bot!"))
+    async def challenge(
+        self, 
+        ctx, 
+        opponent: discord.Member = commands.parameter(
+            description="The user to challenge",
+        ), 
+        n: int = commands.parameter(
+            converter=int,
+            default=3,
+            description="Number of problems",
+        ), 
+        low: int = commands.parameter(
+            converter=int,
+            default=800,
+            description="Low rating",
+        ), 
+        high: int = commands.parameter(
+            converter=int,
+            default=1600,
+            description="High rating",
+        ), 
+        t: int = commands.parameter(
+            converter=int,
+            default=10,
+            description="Time per problem",
+        ) 
+    ):
+        """
+        Challenge another user to a duel
+        ;challenge @user <n> <low> <high> <t>
+        """
+        error = DuelService.validate_challenge(
+            ctx.author.id, opponent.id, opponent.bot, n, low, high
+        )
+        if error:
+            await ctx.send(embed=EmbedBuilder.error(error))
             return
-        
-        if opponent.id == ctx.author.id:
-            await ctx.send(embed=EmbedBuilder.error("Cannot challenge yourself!"))
-            return
-        
-        if not (MIN_PROBLEMS <= n <= MAX_PROBLEMS):
-            await ctx.send(embed=EmbedBuilder.error(f"Number of problems must be between {MIN_PROBLEMS} and {MAX_PROBLEMS}!"))
-            return
-        
-        if low > high:
-            await ctx.send(embed=EmbedBuilder.error("Low rating must be less than or equal to high rating!"))
-            return
-        
-        # Check if users have linked accounts
-        if not self.data_manager.get_cf_handle(ctx.author.id):
-            await ctx.send(embed=EmbedBuilder.error("You need to link your CF account first! Use `;link <handle>`"))
-            return
-        
-        if not self.data_manager.get_cf_handle(opponent.id):
-            await ctx.send(embed=EmbedBuilder.error(f"{opponent.mention} needs to link their CF account first!"))
-            return
-        
-        # Check if already in a duel
-        if self.duel_manager.is_user_in_duel(ctx.author.id) or self.duel_manager.is_user_in_duel(opponent.id):
+
+        if self.duel_service.repo.is_user_in_duel(ctx.author.id) or \
+           self.duel_service.repo.is_user_in_duel(opponent.id):
             await ctx.send(embed=EmbedBuilder.error("One of you is already in an active duel!"))
             return
-        
-        # Create duel
-        duel = Duel(ctx.author.id, opponent.id, n, low, high, t)
-        
+
         await ctx.send("⏳ Generating problems...")
-        if not await duel.generate_problems():
-            await ctx.send(embed=EmbedBuilder.error("Not enough problems found in the specified rating range!"))
+        duel = await self.duel_service.create_challenge(
+            ctx.author.id, opponent.id, n, low, high, t
+        )
+
+        if not duel:
+            await ctx.send(embed=EmbedBuilder.error(
+                "Not enough problems found in the specified rating range!"
+            ))
             return
-        
-        # Store pending duel
-        self.duel_manager.add_pending_duel(opponent.id, duel)
-        
+
         embed = discord.Embed(
             title="⚔️ Duel Challenge!",
             description=f"{ctx.author.mention} challenges {opponent.mention}",
@@ -67,185 +75,126 @@ class Duels(commands.Cog):
         embed.add_field(name="Rating Range", value=f"{low} - {high}", inline=True)
         embed.add_field(name="Time per Problem", value=f"{t} minutes", inline=True)
         embed.set_footer(text=f"{opponent.name}, use ';accept' to accept the challenge!")
-        
         await ctx.send(embed=embed)
-    
+
     @commands.command(name='accept')
     async def accept_challenge(self, ctx):
         """Accept a pending challenge"""
-        duel = self.duel_manager.get_pending_duel_for_opponent(ctx.author.id)
-        
+        duel = self.duel_service.accept_challenge(ctx.author.id)
+
         if not duel:
             await ctx.send(embed=EmbedBuilder.error("No pending challenge found for you!"))
             return
-        
-        # Start duel
-        self.duel_manager.start_duel(duel)
-        
+
         problem = duel.get_current_problem()
-        
         embed = EmbedBuilder.duel_problem(problem, 1, duel.n, duel.time_per_problem)
         embed.title = "⚔️ Duel Started!"
         embed.set_footer(text="Use ';check' to check if you solved it!")
-        
+
         challenger = ctx.guild.get_member(duel.challenger_id)
         await ctx.send(f"{challenger.mention} {ctx.author.mention}")
         await ctx.send(embed=embed)
-    
+
     @commands.command(name='reject')
     async def reject_challenge(self, ctx):
         """Reject a pending challenge"""
-        duel = self.duel_manager.get_pending_duel_for_opponent(ctx.author.id)
-        
+        duel = self.duel_service.reject_challenge(ctx.author.id)
+
         if not duel:
             await ctx.send(embed=EmbedBuilder.error("No pending challenge found for you!"))
             return
-        
+
         challenger = ctx.guild.get_member(duel.challenger_id)
         await ctx.send(f"❌ {ctx.author.mention} rejected the duel challenge from {challenger.mention}.")
-        
-        self.duel_manager.remove_pending_duel(ctx.author.id)
 
     @commands.command(name='check')
     async def check_solution(self, ctx):
-        """Check if you solved the current problem (earliest AC wins)"""
+        """Check if you solved the current problem"""
+        duel, result = await self.duel_service.check_solution(ctx.author.id)
 
-        duel = self.duel_manager.get_active_duel(ctx.author.id)
-
-        if not duel or not duel.active:
+        if duel is None:
             await ctx.send(embed=EmbedBuilder.error("You are not in an active duel!"))
             return
 
-        if duel.is_time_up():
+        if result.time_up:
             await ctx.send("⏰ Time is up! Moving to next problem...")
-            duel.advance_problem()
-
-            if duel.is_complete():
-                await self.end_duel(ctx, duel)
-                return
-
-            await self.show_next_problem(ctx, duel)
+            if result.duel_complete:
+                await self._end_duel(ctx, duel)
+            else:
+                await self._show_next_problem(ctx, duel)
             return
 
-        if duel.problem_solved:
+        if result.already_solved:
             await ctx.send("❌ This problem is already solved. Moving on...")
             return
 
         await ctx.send("🔍 Checking submissions...")
 
-        user_id = ctx.author.id
-        opponent_id = duel.get_opponent_id(user_id)
-
-        # Fetch submissions
-        user_sub = await duel.get_first_ac_submission(user_id, self.data_manager)
-        opp_sub  = await duel.get_first_ac_submission(opponent_id, self.data_manager)
-
-        if not user_sub and not opp_sub:
+        if result.no_solution:
             await ctx.send("❌ No accepted solutions found yet.")
             return
 
-        # Decide winner
-        winner_id = None
-        winner_time = None
-
-        if user_sub and not opp_sub:
-            winner_id = user_id
-            winner_time = user_sub["creationTimeSeconds"]
-
-        elif opp_sub and not user_sub:
-            winner_id = opponent_id
-            winner_time = opp_sub["creationTimeSeconds"]
-
-        else:
-            # Both solved → compare timestamps
-            if user_sub["creationTimeSeconds"] < opp_sub["creationTimeSeconds"]:
-                winner_id = user_id
-                winner_time = user_sub["creationTimeSeconds"]
-            else:
-                winner_id = opponent_id
-                winner_time = opp_sub["creationTimeSeconds"]
-
-        # Award points
-        duel.problem_solved = True
-        problem = duel.get_current_problem()
-        points = problem.get("rating", 1000)
-
-        duel.scores[winner_id] += points
-
-        winner = ctx.guild.get_member(winner_id)
-        loser = ctx.guild.get_member(opponent_id if winner_id == user_id else user_id)
+        winner = ctx.guild.get_member(result.winner_id)
+        loser = ctx.guild.get_member(result.loser_id)
 
         await ctx.send(
-            f"🏆 **{winner.mention} solved first!** +{points} points\n\n"
+            f"🏆 **{winner.mention} solved first!** +{result.points} points\n\n"
             f"📊 **Score:**\n"
-            f"{winner.mention}: {duel.scores[winner_id]}\n"
-            f"{loser.mention}: {duel.scores[loser.id]}"
+            f"{winner.mention}: {duel.scores[result.winner_id]}\n"
+            f"{loser.mention}: {duel.scores[result.loser_id]}"
         )
 
-        duel.advance_problem()
+        if result.duel_complete:
+            await self._end_duel(ctx, duel)
+        else:
+            await self._show_next_problem(ctx, duel)
 
-        if duel.is_complete():
-            await self.end_duel(ctx, duel)
-            return
-
-        await self.show_next_problem(ctx, duel)
-
-    
     @commands.command(name='duelstatus')
     async def duel_status(self, ctx):
         """Check your current duel status"""
-        duel = self.duel_manager.get_active_duel(ctx.author.id)
-        
-        if not duel or not duel.active:
+        duel = self.duel_service.get_duel_status(ctx.author.id)
+
+        if not duel:
             await ctx.send(embed=EmbedBuilder.error("You are not in an active duel!"))
             return
-        
+
         embed = EmbedBuilder.duel_status(ctx, duel)
         await ctx.send(embed=embed)
-    
+
     @commands.command(name='forfeit')
     async def forfeit_duel(self, ctx):
         """Forfeit the current duel"""
-        duel = self.duel_manager.get_active_duel(ctx.author.id)
-        
-        if not duel or not duel.active:
+        duel, opponent_id = self.duel_service.forfeit(ctx.author.id)
+
+        if not duel:
             await ctx.send(embed=EmbedBuilder.error("You are not in an active duel!"))
             return
-        
-        opponent_id = duel.get_opponent_id(ctx.author.id)
+
         opponent = ctx.guild.get_member(opponent_id)
-        
         await ctx.send(f"🏳️ {ctx.author.mention} forfeited! {opponent.mention} wins!")
-        
-        self.duel_manager.end_duel(duel)
-    
-    async def show_next_problem(self, ctx, duel):
-        """Show the next problem in the duel"""
+
+    # -------------------- Helpers --------------------
+
+    async def _show_next_problem(self, ctx, duel):
         problem = duel.get_current_problem()
-        
         if not problem:
-            await self.end_duel(ctx, duel)
+            await self._end_duel(ctx, duel)
             return
-        
+
         embed = EmbedBuilder.duel_problem(
-            problem, 
-            duel.current_problem_idx + 1, 
-            duel.n, 
+            problem,
+            duel.current_problem_idx + 1,
+            duel.n,
             duel.time_per_problem
         )
-        
         await ctx.send(embed=embed)
-    
-    async def end_duel(self, ctx, duel):
-        """End the duel and show final scores"""
+
+    async def _end_duel(self, ctx, duel):
         challenger = ctx.guild.get_member(duel.challenger_id)
         opponent = ctx.guild.get_member(duel.opponent_id)
-        
         embed = EmbedBuilder.duel_results(duel, challenger, opponent)
         await ctx.send(embed=embed)
-        
-        # Clean up
-        self.duel_manager.end_duel(duel)
+
 
 async def setup(bot):
     await bot.add_cog(Duels(bot))
